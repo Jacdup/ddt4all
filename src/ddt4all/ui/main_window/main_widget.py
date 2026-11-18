@@ -90,31 +90,16 @@ class MainWidget(widgets.QMainWindow):
             msgbox.exec_()
 
         self.paramview = None
+        self.current_ecu_name = ""
         
-        # Initialize documentation view based on WebEngine availability
-        if HAS_WEBENGINE:
-            self.docview = webkitwidgets.QWebEngineView()
-            self.docview.load(core.QUrl("https://github.com/cedricp/ddt4all/wiki"))
-            
-            # Configure WebEngine settings for optimal GitHub wiki experience
-            settings = self.docview.settings()
-            settings.setAttribute(webkitwidgets.QWebEngineSettings.JavascriptEnabled, False)  # Disabled to prevent compatibility errors
-            settings.setAttribute(webkitwidgets.QWebEngineSettings.AutoLoadImages, True)     # Better visual experience
-            settings.setAttribute(webkitwidgets.QWebEngineSettings.PluginsEnabled, False)    # Security: disable plugins
-            settings.setAttribute(webkitwidgets.QWebEngineSettings.LocalStorageEnabled, False)  # Security: no local storage
-            settings.setAttribute(webkitwidgets.QWebEngineSettings.LocalContentCanAccessRemoteUrls, False)  # Security
-        else:
-            # Fallback to basic text widget for documentation
-            self.docview = widgets.QTextEdit()
-            self.docview.setReadOnly(True)
-            self.docview.setHtml(f"""
-            <h2>{_("DDT4All Documentation")}</h2>
-            <p><strong>{_("WebEngine not available.")}</strong> {_("For full documentation with web browsing capability, install PyQtWebEngine:")}</p>
-            <pre>pip install PyQtWebEngine</pre>
-            <p>{_("Visit the online documentation at:")} <br>
-            <a href="https://github.com/cedricp/ddt4all/wiki">https://github.com/cedricp/ddt4all/wiki</a></p>
-            <p>{_("This basic view will still show ECU documentation when available.")}</p>
-            """)
+        # Lazy documentation view container (loads WebEngine only when Documentation tab is opened)
+        self.docview = None
+        self.docview_container = widgets.QWidget()
+        self.docview_layout = widgets.QVBoxLayout(self.docview_container)
+        self.docview_layout.setContentsMargins(12, 12, 12, 12)
+        self.doc_placeholder = widgets.QLabel(_("Documentation will load when this tab is selected."))
+        self.doc_placeholder.setAlignment(core.Qt.AlignCenter)
+        self.docview_layout.addWidget(self.doc_placeholder)
 
         self.screennames = []
 
@@ -128,7 +113,7 @@ class MainWidget(widgets.QMainWindow):
         self.infostatus = widgets.QLabel()
 
         # Remove fixed widths to allow widgets to size properly
-        self.connectedstatus.setMinimumWidth(120)
+        self.connectedstatus.setMinimumWidth(160)
         self.connectedstatus.setSizePolicy(widgets.QSizePolicy.Preferred, widgets.QSizePolicy.Fixed)
         
         self.protocolstatus.setMinimumWidth(180)
@@ -171,7 +156,6 @@ class MainWidget(widgets.QMainWindow):
         self.statusbar_widget.addWidget(self.infostatus)
 
         self.tabbedview = widgets.QTabWidget()
-        self.setCentralWidget(self.tabbedview)
 
         self.scrollview = widgets.QScrollArea()
         self.scrollview.setWidgetResizable(False)
@@ -180,42 +164,86 @@ class MainWidget(widgets.QMainWindow):
 
         self.snifferview = Sniffer()
 
-        self.tabbedview.addTab(self.docview, _("Documentation"))
         self.tabbedview.addTab(self.scrollview, _("Screen"))
         self.tabbedview.addTab(self.snifferview, _("CAN Sniffer"))
+        self.tabbedview.addTab(self.docview_container, _("Documentation"))
 
-        if options.simulation_mode:
-            self.buttonEditor = ButtonEditor()
-            self.requesteditor = RequestEditor()
-            self.dataitemeditor = DataEditor()
-            self.ecuparameditor = EcuParamEditor()
-            self.tabbedview.addTab(self.requesteditor, _("Requests"))
-            self.tabbedview.addTab(self.dataitemeditor, _("Data"))
-            self.tabbedview.addTab(self.buttonEditor, _("Buttons"))
-            self.tabbedview.addTab(self.ecuparameditor, _("Ecu parameters"))
+        # Single unified mode: All editors are always available!
+        self.buttonEditor = ButtonEditor()
+        self.requesteditor = RequestEditor()
+        self.dataitemeditor = DataEditor()
+        self.ecuparameditor = EcuParamEditor()
+        self.tabbedview.addTab(self.requesteditor, _("Requests"))
+        self.tabbedview.addTab(self.dataitemeditor, _("Data"))
+        self.tabbedview.addTab(self.buttonEditor, _("Buttons"))
+        self.tabbedview.addTab(self.ecuparameditor, _("Ecu parameters"))
+
+        # Central container with Diagnostic Quick Action Bar above tabs
+        central_container = widgets.QWidget()
+        central_layout = widgets.QVBoxLayout(central_container)
+        central_layout.setContentsMargins(4, 4, 4, 4)
+        central_layout.setSpacing(4)
+
+        self.diag_bar = widgets.QFrame()
+        self.diag_bar.setFrameShape(widgets.QFrame.StyledPanel)
+        diag_bar_layout = widgets.QHBoxLayout(self.diag_bar)
+        diag_bar_layout.setContentsMargins(6, 4, 6, 4)
+        diag_bar_layout.setSpacing(8)
+
+        # Prominent Diagnostic button
+        self.btn_read_dtc = widgets.QPushButton(gui.QIcon(ICON_DTC), _(" Read DTC (Diagnostics)"))
+        self.btn_read_dtc.setToolTip(_("Read Diagnostic Trouble Codes for the active ECU"))
+        self.btn_read_dtc.setStyleSheet("QPushButton { font-weight: bold; padding: 5px 12px; background-color: #238636; color: white; border-radius: 4px; } QPushButton:hover { background-color: #2ea043; } QPushButton:disabled { background-color: #555555; color: #888888; }")
+        self.btn_read_dtc.clicked.connect(self.readDtc)
+        self.btn_read_dtc.setEnabled(False)
+        diag_bar_layout.addWidget(self.btn_read_dtc)
+
+        self.btn_clear_dtc = widgets.QPushButton(_("Clear DTC"))
+        self.btn_clear_dtc.setToolTip(_("Clear Diagnostic Trouble Codes for the active ECU"))
+        self.btn_clear_dtc.setStyleSheet("QPushButton { font-weight: bold; padding: 5px 10px; background-color: #cf222e; color: white; border-radius: 4px; } QPushButton:hover { background-color: #f85149; } QPushButton:disabled { background-color: #555555; color: #888888; }")
+        self.btn_clear_dtc.clicked.connect(self.clearDtc)
+        self.btn_clear_dtc.setEnabled(False)
+        diag_bar_layout.addWidget(self.btn_clear_dtc)
+
+        self.active_info_label = widgets.QLabel(_("Scanning for ECUs..."))
+        self.active_info_label.setStyleSheet("font-weight: bold; color: palette(text); padding-left: 6px;")
+        diag_bar_layout.addWidget(self.active_info_label)
+        diag_bar_layout.addStretch()
+
+        central_layout.addWidget(self.diag_bar)
+        central_layout.addWidget(self.tabbedview)
+        self.setCentralWidget(central_container)
 
         screen_widget = widgets.QWidget()
         self.treedock_widget = widgets.QDockWidget(self)
-        self.treedock_widget.setWindowTitle(_("Screen Window"))
+        self.treedock_widget.setWindowTitle(_("Screens"))
         self.treedock_widget.setWidget(screen_widget)
+        
+        treedock_layout = widgets.QVBoxLayout(screen_widget)
+        treedock_layout.setContentsMargins(4, 4, 4, 4)
+        treedock_layout.setSpacing(4)
+        
+        self.screen_search = widgets.QLineEdit()
+        self.screen_search.setPlaceholderText(_("Search screens..."))
+        self.screen_search.setClearButtonEnabled(True)
+        self.screen_search.textChanged.connect(self.filter_screens)
+        treedock_layout.addWidget(self.screen_search)
+
         self.treeview_params = widgets.QTreeWidget()
         self.treeview_params.setSortingEnabled(True)
         self.treeview_params.sortByColumn(0, core.Qt.AscendingOrder)
-
-        treedock_layout = widgets.QVBoxLayout()
-        treedock_layout.addWidget(self.treeview_params)
-        screen_widget.setLayout(treedock_layout)
         self.treeview_params.setHeaderLabels([_("Screens")])
         self.treeview_params.clicked.connect(self.changeScreen)
+        treedock_layout.addWidget(self.treeview_params)
 
         self.treedock_logs = widgets.QDockWidget(self)
-        self.treedock_logs.setWindowTitle(_("Logs Window"))
+        self.treedock_logs.setWindowTitle(_("Logs"))
         self.logview = widgets.QTextEdit()
         self.logview.setReadOnly(True)
         self.treedock_logs.setWidget(self.logview)
 
         self.treedock_ecu = widgets.QDockWidget(self)
-        self.treedock_ecu.setWindowTitle(_("Ecu Window"))
+        self.treedock_ecu.setWindowTitle(_("Detected ECUs"))
         self.treeview_ecu = widgets.QListWidget(self.treedock_ecu)
         self.treedock_ecu.setWidget(self.treeview_ecu)
         self.treeview_ecu.clicked.connect(self.changeECU)
@@ -224,7 +252,7 @@ class MainWidget(widgets.QMainWindow):
 
         self.eculistwidget = EcuList(self.ecu_scan, self.treeview_ecu, self.vehicles)
         self.treeview_eculist = widgets.QDockWidget(self)
-        self.treeview_eculist.setWindowTitle(_("Ecu List Window"))
+        self.treeview_eculist.setWindowTitle(_("ECU Database"))
         self.treeview_eculist.setWidget(self.eculistwidget)
 
         self.addDockWidget(core.Qt.LeftDockWidgetArea, self.treeview_eculist)
@@ -234,10 +262,17 @@ class MainWidget(widgets.QMainWindow):
 
         self.toolbar = self.addToolBar(_("ToolBar"))
         self.toolbar.setContextMenuPolicy(core.Qt.PreventContextMenu)
+        self.toolbar.setToolButtonStyle(core.Qt.ToolButtonTextBesideIcon)
 
         self.diagaction = widgets.QAction(gui.QIcon(ICON_DTC), _("Read DTC"), self)
+        self.diagaction.setToolTip(_("Read Diagnostic Trouble Codes for selected ECU"))
         self.diagaction.triggered.connect(self.readDtc)
         self.diagaction.setEnabled(False)
+
+        self.cleardtcaction = widgets.QAction(gui.QIcon(ICON_DTC), _("Clear DTC"), self)
+        self.cleardtcaction.setToolTip(_("Clear Diagnostic Trouble Codes for selected ECU"))
+        self.cleardtcaction.triggered.connect(self.clearDtc)
+        self.cleardtcaction.setEnabled(False)
 
         self.log = widgets.QAction(gui.QIcon(ICON_LOG), _("Full log"), self)
         self.log.setCheckable(True)
@@ -287,21 +322,31 @@ class MainWidget(widgets.QMainWindow):
         self.zoominbutton.clicked.connect(self.zoomin)
         self.zoomoutbutton.clicked.connect(self.zoomout)
 
-        self.toolbar.addSeparator()
-        self.toolbar.addAction(self.log)
-        self.toolbar.addSeparator()
-        self.toolbar.addAction(self.expert)
-        self.toolbar.addSeparator()
-        self.toolbar.addAction(self.autorefresh)
+        self.adapter_action = widgets.QAction(gui.QIcon(ICON_OBD), _("Adapter Settings"), self)
+        self.adapter_action.setToolTip(_("Configure OBD/ELM Adapter connection"))
+        self.adapter_action.triggered.connect(self.show_options_dialog)
+
+        self.ui_edit_button = widgets.QPushButton(_("UI Edit"))
+        self.ui_edit_button.setCheckable(True)
+        self.ui_edit_button.setToolTip(_("Toggle layout editing mode"))
+        self.ui_edit_button.clicked.connect(self.toggle_edit)
+
+        # Prominent diagnostic actions first
+        self.toolbar.addAction(self.diagaction)
+        self.toolbar.addAction(self.cleardtcaction)
         self.toolbar.addSeparator()
         self.toolbar.addAction(self.refresh)
+        self.toolbar.addAction(self.autorefresh)
         self.toolbar.addSeparator()
-        self.toolbar.addAction(self.diagaction)
+        self.toolbar.addAction(self.expert)
+        self.toolbar.addAction(self.log)
+        self.toolbar.addSeparator()
+        self.toolbar.addWidget(self.ui_edit_button)
+        self.toolbar.addSeparator()
+        self.toolbar.addAction(self.adapter_action)
         self.toolbar.addSeparator()
         self.toolbar.addAction(self.hexinput)
-        self.toolbar.addSeparator()
         self.toolbar.addAction(self.cominput)
-        self.toolbar.addSeparator()
         self.toolbar.addAction(self.fctrigger)
         self.toolbar.addSeparator()
         self.toolbar.addWidget(self.canlinecombo)
@@ -311,13 +356,6 @@ class MainWidget(widgets.QMainWindow):
         self.toolbar.addWidget(self.zoominbutton)
         self.toolbar.addSeparator()
         self.toolbar.addWidget(self.zoomoutbutton)
-
-        if options.simulation_mode:
-            self.ui_edit_button = widgets.QPushButton(_("UI Edit"))
-            self.ui_edit_button.setCheckable(True)
-            self.toolbar.addSeparator()
-            self.toolbar.addWidget(self.ui_edit_button)
-            self.ui_edit_button.clicked.connect(self.toggle_edit)
 
         if not os.path.exists(get_vehicles_dir()):
             os.mkdir(get_vehicles_dir())
@@ -350,6 +388,9 @@ class MainWidget(widgets.QMainWindow):
 
         # Tools menu
         tools_menu = menu.addMenu(_("Tools"))
+        adapter_opt_action = tools_menu.addAction(_("Adapter & Connection Settings"))
+        adapter_opt_action.triggered.connect(self.show_options_dialog)
+        tools_menu.addSeparator()
         identecu = tools_menu.addAction(_("Identify ECU"))
         identecu.triggered.connect(self.identEcu)
         newecuction = tools_menu.addAction(_("Create New ECU"))
@@ -473,9 +514,85 @@ class MainWidget(widgets.QMainWindow):
         about_content = help_menu.addAction(_("About"))
         about_content.triggered.connect(self.about_content_msg)
 
-        self.setConnected(True)
-        self.tabbedview.setCurrentIndex(1)
+        self.setConnected(not options.simulation_mode)
+        self.tabbedview.setCurrentIndex(0)
         self.showMaximized()
+        self.tabbedview.currentChanged.connect(self.on_tab_changed)
+        core.QTimer.singleShot(250, self.auto_start_scan)
+
+    def init_docview_lazy(self):
+        """Lazy load documentation view on first access to avoid startup delay"""
+        if self.docview is not None:
+            return
+        if hasattr(self, 'doc_placeholder') and self.doc_placeholder:
+            self.docview_layout.removeWidget(self.doc_placeholder)
+            self.doc_placeholder.deleteLater()
+            self.doc_placeholder = None
+
+        if HAS_WEBENGINE:
+            self.docview = webkitwidgets.QWebEngineView()
+            self.docview.load(core.QUrl("https://github.com/cedricp/ddt4all/wiki"))
+            settings = self.docview.settings()
+            settings.setAttribute(webkitwidgets.QWebEngineSettings.JavascriptEnabled, False)
+            settings.setAttribute(webkitwidgets.QWebEngineSettings.AutoLoadImages, True)
+            settings.setAttribute(webkitwidgets.QWebEngineSettings.PluginsEnabled, False)
+            settings.setAttribute(webkitwidgets.QWebEngineSettings.LocalStorageEnabled, False)
+            settings.setAttribute(webkitwidgets.QWebEngineSettings.LocalContentCanAccessRemoteUrls, False)
+        else:
+            self.docview = widgets.QTextEdit()
+            self.docview.setReadOnly(True)
+            self.docview.setHtml(f"""
+            <h2>{_("DDT4All Documentation")}</h2>
+            <p><strong>{_("WebEngine not available.")}</strong> {_("For full documentation with web browsing capability, install PyQtWebEngine:")}</p>
+            <pre>pip install PyQtWebEngine</pre>
+            <p>{_("Visit the online documentation at:")} <br>
+            <a href="https://github.com/cedricp/ddt4all/wiki">https://github.com/cedricp/ddt4all/wiki</a></p>
+            """)
+        self.docview_layout.addWidget(self.docview)
+
+    def on_tab_changed(self, index):
+        if self.tabbedview.widget(index) == self.docview_container and self.docview is None:
+            self.init_docview_lazy()
+
+    def filter_screens(self, text):
+        """Filter screens in real-time as user types in search box"""
+        text_lower = text.strip().lower()
+        for i in range(self.treeview_params.topLevelItemCount()):
+            cat_item = self.treeview_params.topLevelItem(i)
+            cat_matches = text_lower in cat_item.text(0).lower()
+            child_match_count = 0
+            for j in range(cat_item.childCount()):
+                child_item = cat_item.child(j)
+                if not text_lower or cat_matches or text_lower in child_item.text(0).lower():
+                    child_item.setHidden(False)
+                    child_match_count += 1
+                else:
+                    child_item.setHidden(True)
+            if not text_lower or cat_matches or child_match_count > 0:
+                cat_item.setHidden(False)
+                if text_lower:
+                    cat_item.setExpanded(True)
+            else:
+                cat_item.setHidden(True)
+
+    def auto_start_scan(self):
+        """Automatically scan for ECUs on opening and select available ECU"""
+        project_code = self.eculistwidget.get_current_project_code()
+        if not project_code or project_code == "ALL":
+            last_veh = options.get_last_selected_vehicle()
+            if last_veh and self.vehicles and "projects" in self.vehicles and last_veh in self.vehicles["projects"]:
+                project_code = str(self.vehicles["projects"][last_veh].get("code", "ALL"))
+            else:
+                for k, v in self.vehicles.get("projects", {}).items():
+                    if k != "All" and "code" in v:
+                        project_code = str(v["code"])
+                        break
+
+        if not project_code or project_code == "ALL":
+            project_code = "X98"
+
+        self.logview.append(_("Startup auto-scan initiated for vehicle: ") + str(project_code))
+        self.scan_project(project_code)
 
     def about_content_msg(self):
         msgbox = widgets.QMessageBox()
@@ -851,36 +968,69 @@ class MainWidget(widgets.QMainWindow):
 
     def scan_project(self, project):
         if project == "ALL":
-            self.scan()
-            return
+            project = None
+
         self.ecu_scan.clear()
-        self.logview.append(_("Scanning CAN") + " -> " + project)
-        self.ecu_scan.scan(self.progressstatus, self.infostatus, project)
-        self.logview.append(_("Scanning KWP") + " -> " + project)
-        self.ecu_scan.scan_kwp(self.progressstatus, self.infostatus, project)
-        if options.configuration.get('doip_scan', True):
-            self.logview.append(_("Scanning DoIP") + " -> " + project)
-            self.ecu_scan.scan_doip(self.progressstatus, self.infostatus, project)
+        self.treeview_ecu.clear()
+        self.treeview_params.clear()
+        self.ecunamemap = {}
 
-        for ecu in self.ecu_scan.ecus.keys():
-            self.ecunamemap[ecu] = self.ecu_scan.ecus[ecu].name
-            item = widgets.QListWidgetItem(ecu)
-            if '.xml' in self.ecu_scan.ecus[ecu].href.lower():
-                item.setForeground(core.Qt.yellow)
-            else:
-                item.setForeground(core.Qt.green)
-            self.treeview_ecu.addItem(item)
+        if options.elm is not None:
+            self.logview.append(_("Scanning CAN") + (" -> " + str(project) if project else ""))
+            self.ecu_scan.scan(self.progressstatus, self.infostatus, project, self.canlinecombo.currentIndex())
+            self.logview.append(_("Scanning KWP") + (" -> " + str(project) if project else ""))
+            self.ecu_scan.scan_kwp(self.progressstatus, self.infostatus, project)
+            if options.configuration.get('doip_scan', True):
+                self.logview.append(_("Scanning DoIP") + (" -> " + str(project) if project else ""))
+                self.ecu_scan.scan_doip(self.progressstatus, self.infostatus, project)
 
-        for ecu in self.ecu_scan.approximate_ecus.keys():
-            self.ecunamemap[ecu] = self.ecu_scan.approximate_ecus[ecu].name
-            item = widgets.QListWidgetItem(ecu)
-            item.setForeground(core.Qt.blue)
-            self.treeview_ecu.addItem(item)
+            for ecu in self.ecu_scan.ecus.keys():
+                self.ecunamemap[ecu] = self.ecu_scan.ecus[ecu].name
+                item = widgets.QListWidgetItem(ecu)
+                if '.xml' in self.ecu_scan.ecus[ecu].href.lower():
+                    item.setForeground(gui.QColor("#d29922"))
+                else:
+                    item.setForeground(gui.QColor("#2ea043"))
+                self.treeview_ecu.addItem(item)
+
+            for ecu in self.ecu_scan.approximate_ecus.keys():
+                self.ecunamemap[ecu] = self.ecu_scan.approximate_ecus[ecu].name
+                item = widgets.QListWidgetItem(ecu)
+                item.setForeground(gui.QColor("#58a6ff"))
+                self.treeview_ecu.addItem(item)
+        else:
+            self.logview.append(_("Offline / Simulation: loading available ECUs from vehicle database") + (" -> " + str(project) if project else ""))
+
+        # Fallback to catalog ECUs if no response from hardware/simulated bus or running offline
+        if self.treeview_ecu.count() == 0 and project:
+            project_upper = str(project).upper()
+            for target in self.ecu_scan.ecu_database.targets:
+                if project_upper in [p.upper() for p in target.projects]:
+                    formatted_name = f"[ {target.group} ] {target.name}"
+                    if formatted_name not in self.ecunamemap:
+                        self.ecunamemap[formatted_name] = target.name
+                        item = widgets.QListWidgetItem(formatted_name)
+                        item.setForeground(gui.QColor("#2ea043"))
+                        self.treeview_ecu.addItem(item)
 
         self.progressstatus.setValue(0)
         
-        # Try to restore last opened ECU after scan is complete
-        self.restore_last_ecu()
+        # Auto-select the available ECU
+        if self.treeview_ecu.count() > 0:
+            selected_row = 0
+            last_ecu = options.get_last_opened_ecu()
+            if last_ecu:
+                for i in range(self.treeview_ecu.count()):
+                    item_text = self.treeview_ecu.item(i).text()
+                    if item_text == last_ecu or last_ecu in item_text:
+                        selected_row = i
+                        break
+            self.treeview_ecu.setCurrentRow(selected_row)
+            idx = self.treeview_ecu.model().index(selected_row, 0)
+            self.changeECU(idx)
+        else:
+            if hasattr(self, 'active_info_label'):
+                self.active_info_label.setText(_("No ECUs detected"))
 
     def scan(self):
         msgBox = widgets.QMessageBox()
@@ -944,32 +1094,36 @@ class MainWidget(widgets.QMainWindow):
             self.ecunamemap[ecu] = self.ecu_scan.ecus[ecu].name
             item = widgets.QListWidgetItem(ecu)
             if '.xml' in self.ecu_scan.ecus[ecu].href.lower():
-                item.setForeground(core.Qt.yellow)
+                item.setForeground(gui.QColor("#d29922"))
             else:
-                item.setForeground(core.Qt.green)
+                item.setForeground(gui.QColor("#2ea043"))
             self.treeview_ecu.addItem(item)
 
         for ecu in self.ecu_scan.approximate_ecus.keys():
             self.ecunamemap[ecu] = self.ecu_scan.approximate_ecus[ecu].name
             item = widgets.QListWidgetItem(ecu)
-            item.setForeground(core.Qt.blue)
+            item.setForeground(gui.QColor("#58a6ff"))
             self.treeview_ecu.addItem(item)
 
         self.progressstatus.setValue(0)
         
-        # Try to restore last opened ECU after scan is complete
-        self.restore_last_ecu()
+        # Auto-select the available ECU
+        if self.treeview_ecu.count() > 0:
+            self.treeview_ecu.setCurrentRow(0)
+            idx = self.treeview_ecu.model().index(0, 0)
+            self.changeECU(idx)
 
     def setConnected(self, on):
-        if options.simulation_mode:
-            self.connectedstatus.setStyleSheet("background-color : orange; color: black")
-            self.connectedstatus.setText(_("EDITION MODE"))
+        if not on or options.simulation_mode:
+            self.connectedstatus.setStyleSheet("background-color: #0969da; color: white; border-radius: 4px; font-weight: bold; padding: 2px 8px;")
+            self.connectedstatus.setText(_("OFFLINE (SIMULATION)"))
             return
         if on:
-            self.connectedstatus.setStyleSheet("background-color : green; color: black")
-            self.connectedstatus.setText(_("CONNECTED"))
+            port_text = f" ({options.port})" if options.port and options.port != 'DUMMY' else ""
+            self.connectedstatus.setStyleSheet("background-color: #2ea043; color: white; border-radius: 4px; font-weight: bold; padding: 2px 8px;")
+            self.connectedstatus.setText(_("CONNECTED") + port_text)
         else:
-            self.connectedstatus.setStyleSheet("background-color : red; color: black")
+            self.connectedstatus.setStyleSheet("background-color: #cf222e; color: white; border-radius: 4px; font-weight: bold; padding: 2px 8px;")
             self.connectedstatus.setText(_("DISCONNECTED"))
 
     def saveEcus(self):
@@ -1074,6 +1228,24 @@ class MainWidget(widgets.QMainWindow):
     def readDtc(self):
         if self.paramview:
             self.paramview.readDTC()
+        else:
+            msgbox = widgets.QMessageBox()
+            appIcon = gui.QIcon(ICON_OBD)
+            msgbox.setWindowIcon(appIcon)
+            msgbox.setWindowTitle(_("Diagnostics"))
+            msgbox.setText(_("Please select an ECU to read Diagnostic Trouble Codes (DTC)."))
+            msgbox.exec_()
+
+    def clearDtc(self):
+        if self.paramview:
+            self.paramview.clearDTC()
+        else:
+            msgbox = widgets.QMessageBox()
+            appIcon = gui.QIcon(ICON_OBD)
+            msgbox.setWindowIcon(appIcon)
+            msgbox.setWindowTitle(_("Clear DTC"))
+            msgbox.setText(_("Please select an ECU to clear Diagnostic Trouble Codes (DTC)."))
+            msgbox.exec_()
 
     def changeAutorefresh(self):
         options.auto_refresh = self.autorefresh.isChecked()
@@ -1099,11 +1271,12 @@ class MainWidget(widgets.QMainWindow):
         options.log_all = self.log.isChecked()
 
     def readDTC(self):
-        if self.paramview:
-            self.paramview.readDTC()
+        self.readDtc()
 
     def changeScreen(self, index):
         item = self.treeview_params.model().itemData(index)
+        if not item or 0 not in item:
+            return
 
         screen = item[0]
 
@@ -1118,7 +1291,12 @@ class MainWidget(widgets.QMainWindow):
                 self.paramview.panel.resize(self.paramview.panel.screen_width, self.paramview.panel.screen_height)
                 self.paramview.resize(self.paramview.panel.screen_width + 50, self.paramview.panel.screen_height + 50)
         
-        self.diagaction.setEnabled(inited)
+        self.diagaction.setEnabled(True)
+        self.cleardtcaction.setEnabled(True)
+        if hasattr(self, 'btn_read_dtc'):
+            self.btn_read_dtc.setEnabled(True)
+        if hasattr(self, 'btn_clear_dtc'):
+            self.btn_clear_dtc.setEnabled(True)
         self.hexinput.setEnabled(inited)
         self.cominput.setEnabled(inited)
         self.expert.setChecked(False)
@@ -1127,7 +1305,11 @@ class MainWidget(widgets.QMainWindow):
         options.auto_refresh = False
         self.refresh.setEnabled(True)
 
-        if options.simulation_mode and self.paramview.layoutdict:
+        if hasattr(self, 'active_info_label'):
+            ecu_str = getattr(self, 'current_ecu_name', '')
+            self.active_info_label.setText(f"ECU: {ecu_str}  ›  Screen: {screen}")
+
+        if hasattr(self, 'buttonEditor') and self.buttonEditor and self.paramview.layoutdict:
             if screen in self.paramview.layoutdict['screens']:
                 self.buttonEditor.set_layout(self.paramview.layoutdict['screens'][screen])
 
@@ -1158,8 +1340,11 @@ class MainWidget(widgets.QMainWindow):
 
     def changeECU(self, index):
         item = self.treeview_ecu.model().itemData(index)
+        if not item or 0 not in item:
+            return
 
         ecu_name = item[0]
+        self.current_ecu_name = ecu_name
 
         isxml = True
 
@@ -1183,10 +1368,10 @@ class MainWidget(widgets.QMainWindow):
             ecu_addr = ecu.addr
 
         if self.snifferview.set_file(ecu_file):
-            self.tabbedview.setCurrentIndex(2)
+            self.tabbedview.setCurrentIndex(1)
         else:
             if self.screenlogfile:
-                self.screenlogfile.write("ECU : " + ecu.href + "\n")
+                self.screenlogfile.write("ECU : " + (ecu.href if ecu else ecu_name) + "\n")
 
         if self.paramview:
             if ecu_file == self.paramview.ddtfile:
@@ -1196,8 +1381,39 @@ class MainWidget(widgets.QMainWindow):
         # Save last opened ECU
         options.set_last_opened_ecu(ecu_name)
 
+        # Expand all screens in treeview_params so available screens are shown
+        self.treeview_params.expandAll()
+
+        # Auto-select the first available screen
+        if self.treeview_params.topLevelItemCount() > 0:
+            first_cat = self.treeview_params.topLevelItem(0)
+            if first_cat.childCount() > 0:
+                first_screen = first_cat.child(0)
+                self.treeview_params.setCurrentItem(first_screen)
+                idx = self.treeview_params.indexFromItem(first_screen)
+                self.changeScreen(idx)
+            else:
+                self.treeview_params.setCurrentItem(first_cat)
+                idx = self.treeview_params.indexFromItem(first_cat)
+                self.changeScreen(idx)
+
+        # Update labels and enable diagnostic buttons
+        if hasattr(self, 'active_info_label'):
+            self.active_info_label.setText(f"ECU: {ecu_name}")
+        self.diagaction.setEnabled(True)
+        self.cleardtcaction.setEnabled(True)
+        if hasattr(self, 'btn_read_dtc'):
+            self.btn_read_dtc.setEnabled(True)
+        if hasattr(self, 'btn_clear_dtc'):
+            self.btn_clear_dtc.setEnabled(True)
+
     def set_param_file(self, ecu_file, ecu_addr, ecu_name, isxml):
         self.diagaction.setEnabled(True)
+        self.cleardtcaction.setEnabled(True)
+        if hasattr(self, 'btn_read_dtc'):
+            self.btn_read_dtc.setEnabled(True)
+        if hasattr(self, 'btn_clear_dtc'):
+            self.btn_clear_dtc.setEnabled(True)
         self.hexinput.setEnabled(True)
         self.cominput.setEnabled(True)
         self.treeview_params.clear()
@@ -1213,7 +1429,7 @@ class MainWidget(widgets.QMainWindow):
         self.paramview = ParamWidget(self.scrollview, ecu_file, ecu_addr, ecu_name, self.logview,
                                                 self.protocolstatus, self.canlinecombo.currentIndex())
         self.paramview.infobox = self.infostatus
-        if options.simulation_mode:
+        if hasattr(self, 'requesteditor') and self.requesteditor:
             self.requesteditor.set_ecu(self.paramview.ecurequestsparser)
             self.dataitemeditor.set_ecu(self.paramview.ecurequestsparser)
             self.buttonEditor.set_ecu(self.paramview.ecurequestsparser)

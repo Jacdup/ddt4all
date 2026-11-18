@@ -207,9 +207,11 @@ class MainWindowOptions(widgets.QDialog):
         layout.addLayout(speedlayout)
 
         button_layout = widgets.QHBoxLayout()
-        button_con = widgets.QPushButton(_("Connected mode"))
-        button_dmo = widgets.QPushButton(_("Edition mode"))
+        button_con = widgets.QPushButton(_("Connect"))
+        button_dmo = widgets.QPushButton(_("Use Offline"))
         button_elm_chk = widgets.QPushButton(_("ELM benchmark"))
+        button_close = widgets.QPushButton(_("Close"))
+        button_close.clicked.connect(self.close)
 
         self.elmchk = button_elm_chk
 
@@ -370,6 +372,7 @@ class MainWindowOptions(widgets.QDialog):
         button_layout.addWidget(button_con)
         button_layout.addWidget(button_dmo)
         button_layout.addWidget(button_elm_chk)
+        button_layout.addWidget(button_close)
         layout.addLayout(button_layout)
 
         self.logview = widgets.QTextEdit()
@@ -1187,12 +1190,10 @@ class MainWindowOptions(widgets.QDialog):
             msgbox.exec_()
             return
 
-        options.simulation_mode = False
-
         if self.wifibutton.isChecked():
             self.port = str(self.wifiinput.text())
-            self.mode = 1
-            self.done(True)
+            options.port_name = "WiFi"
+            self.raise_port_speed = "No"
         else:
             currentitem = self.listview.currentItem()
             if currentitem:
@@ -1200,9 +1201,7 @@ class MainWindowOptions(widgets.QDialog):
                 port_data = self.ports[portinfo]
                 self.port = port_data[0]
                 options.port_name = port_data[1]
-                self.mode = 1
                 self.raise_port_speed = self.obdlinkspeedcombo.currentText()
-                self.done(True)
             else:
                 msgbox = widgets.QMessageBox()
                 appIcon = gui.QIcon(ICON_OBD)
@@ -1210,6 +1209,34 @@ class MainWindowOptions(widgets.QDialog):
                 msgbox.setWindowTitle(version.__appname__)
                 msgbox.setText(_("Please select a communication port"))
                 msgbox.exec_()
+                return
+
+        # Attempt connection to ELM
+        print(_("Initializing ELM with speed %i...") % self.selectedportspeed)
+        options.elm = elm.ELM(str(self.port), self.selectedportspeed, self.adapter, self.raise_port_speed)
+
+        if options.elm_failed:
+            self.show()
+            self.logview.show()
+            self.logview.append(options.get_last_error())
+            msgbox = widgets.QMessageBox()
+            msgbox.setWindowIcon(gui.QIcon(ICON_OBD))
+            msgbox.setWindowTitle(version.__appname__)
+            msgbox.setText(_("No ELM327 or OBDLINK-SX detected on COM port ") + str(self.port))
+            msgbox.exec_()
+            return
+
+        options.simulation_mode = False
+        options.port = str(self.port)
+        options.port_speed = self.selectedportspeed
+        options.configuration["last_port"] = options.port
+        options.configuration["last_port_speed"] = options.port_speed
+        options.configuration["last_adapter"] = self.adapter
+        options.save_config()
+        self.mode = 1
+        if options.main_window:
+            options.main_window.setConnected(True)
+        self.done(True)
 
     def demoMode(self):
         self.timer.stop()
@@ -1221,4 +1248,7 @@ class MainWindowOptions(widgets.QDialog):
         self.mode = 2
         options.report_data = False
         options.simulation_mode = True
+        options.port = 'DUMMY'
+        if options.main_window:
+            options.main_window.setConnected(False)
         self.done(True)

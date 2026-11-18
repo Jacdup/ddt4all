@@ -153,25 +153,39 @@ class EcuList(widgets.QWidget):
         elm.snat_ext = self.vehicles["projects"][project_key]["snat_ext"]
         elm.dnat = self.vehicles["projects"][project_key]["dnat"]
         elm.dnat_ext = self.vehicles["projects"][project_key]["dnat_ext"]
-        self.parent().parent().scan_project(project)
+        if options.main_window and hasattr(options.main_window, 'scan_project'):
+            options.main_window.scan_project(project)
+        elif hasattr(self.parent(), 'parent') and hasattr(self.parent().parent(), 'scan_project'):
+            self.parent().parent().scan_project(project)
+
+    def get_current_project_code(self):
+        """Get the project code for currently selected vehicle"""
+        if not self.vehicles or not self.vehicles.get("projects"):
+            return "ALL"
+        project_key = self.vehicle_combo.currentData()
+        if project_key is None:
+            project_key = self.vehicle_combo.currentText()
+        if project_key in self.vehicles["projects"]:
+            return str(self.vehicles["projects"][project_key].get("code", "ALL"))
+        return "ALL"
 
     def init(self):
         self.list.clear()
         self.list.setSortingEnabled(True)
         self.list.setColumnCount(8)
-        self.list.model().setHeaderData(0, core.Qt.Horizontal, 'ECU name')
-        self.list.model().setHeaderData(1, core.Qt.Horizontal, 'ID')
-        self.list.model().setHeaderData(2, core.Qt.Horizontal, 'Protocol')
-        self.list.model().setHeaderData(3, core.Qt.Horizontal, 'Supplier')
-        self.list.model().setHeaderData(4, core.Qt.Horizontal, 'Diag')
-        self.list.model().setHeaderData(5, core.Qt.Horizontal, 'Soft')
-        self.list.model().setHeaderData(6, core.Qt.Horizontal, 'Version')
-        self.list.model().setHeaderData(7, core.Qt.Horizontal, 'Projets')
+        self.list.model().setHeaderData(0, core.Qt.Horizontal, _('ECU name'))
+        self.list.model().setHeaderData(1, core.Qt.Horizontal, _('ID'))
+        self.list.model().setHeaderData(2, core.Qt.Horizontal, _('Protocol'))
+        self.list.model().setHeaderData(3, core.Qt.Horizontal, _('Supplier'))
+        self.list.model().setHeaderData(4, core.Qt.Horizontal, _('Diag'))
+        self.list.model().setHeaderData(5, core.Qt.Horizontal, _('Soft'))
+        self.list.model().setHeaderData(6, core.Qt.Horizontal, _('Version'))
+        self.list.model().setHeaderData(7, core.Qt.Horizontal, _('Projets'))
         self.list.sortByColumn(0, core.Qt.AscendingOrder)
-        stored_ecus = {"Custom": []}
+        self.stored_ecus = {"Custom": []}
 
         if self.ecuscan.getNumEcuDb() > 0:
-            stored_ecus = {}
+            self.stored_ecus = {}
 
         custom_files = glob.glob("./json/*.json.targets")
 
@@ -195,24 +209,24 @@ class EcuList(widgets.QWidget):
                 else:
                     grp = self.ecu_map[target['address']]
 
-            if grp not in stored_ecus:
-                stored_ecus[grp] = []
+            if grp not in self.stored_ecus:
+                self.stored_ecus[grp] = []
 
             name = "/".join(projects_list)
 
-            stored_ecus[grp].append([cs[:-8][7:], name, protocol])
+            self.stored_ecus[grp].append([cs[:-8][7:], name, protocol])
 
-        longgroupnames = {}
+        self.longgroupnames = {}
         for ecu in self.ecuscan.ecu_database.targets:
             if ecu.addr in self.ecuscan.ecu_database.addr_group_mapping:
                 grp = self.ecuscan.ecu_database.addr_group_mapping[ecu.addr]
                 if ecu.addr in self.ecuscan.ecu_database.addr_group_mapping_long:
-                    longgroupnames[grp] = self.ecuscan.ecu_database.addr_group_mapping_long[ecu.addr]
+                    self.longgroupnames[grp] = self.ecuscan.ecu_database.addr_group_mapping_long[ecu.addr]
             else:
                 grp = "?"
 
-            if grp not in stored_ecus:
-                stored_ecus[grp] = []
+            if grp not in self.stored_ecus:
+                self.stored_ecus[grp] = []
 
             projname = "/".join(ecu.projects)
 
@@ -223,26 +237,53 @@ class EcuList(widgets.QWidget):
 
             row = [ecu.name, ecu.addr, ecu.protocol, supplier, diag, soft, version, projname]
             found = False
-            for r in stored_ecus[grp]:
+            for r in self.stored_ecus[grp]:
                 if (r[0], r[1]) == (row[0], row[1]):
                     found = True
                     break
             if not found:
-                stored_ecus[grp].append(row)
+                self.stored_ecus[grp].append(row)
 
-        keys = list(stored_ecus.keys())
+        keys = list(self.stored_ecus.keys())
         try:
             keys.sort(key=locale.strxfrm)
         except (locale.Error, AttributeError):
             keys.sort()
-        for e in keys:
-            item = widgets.QTreeWidgetItem(self.list, [e])
-            if e in longgroupnames:
-                item.setToolTip(0, longgroupnames[e])
-            elif e in self.ecuscan.ecu_database.addr_group_mapping:
-                item.setToolTip(0, self.ecuscan.ecu_database.addr_group_mapping[e])
-            for t in stored_ecus[e]:
-                widgets.QTreeWidgetItem(item, t)
+        self.stored_keys = keys
+
+        # Lazy load: do not populate all 10,000+ items into tree here!
+        # Tree will be populated for the selected vehicle on demand.
+
+    def populate_for_project(self, project):
+        """Lazy load: only populate tree widget with ECUs matching this project"""
+        self.list.clear()
+        project_upper = str(project).upper() if project else "ALL"
+        is_all = project_upper == "ALL"
+
+        for grp in getattr(self, 'stored_keys', []):
+            rows = self.stored_ecus.get(grp, [])
+            if not is_all:
+                matching_rows = []
+                for r in rows:
+                    if len(r) > 7:
+                        projs = str(r[7]).upper().split("/")
+                    elif len(r) > 1:
+                        projs = str(r[1]).upper().split("/")
+                    else:
+                        projs = []
+                    if project_upper in projs:
+                        matching_rows.append(r)
+            else:
+                matching_rows = rows
+
+            if matching_rows:
+                grp_item = widgets.QTreeWidgetItem(self.list, [grp])
+                if grp in getattr(self, 'longgroupnames', {}):
+                    grp_item.setToolTip(0, self.longgroupnames[grp])
+                elif grp in self.ecuscan.ecu_database.addr_group_mapping:
+                    grp_item.setToolTip(0, self.ecuscan.ecu_database.addr_group_mapping[grp])
+                for r in matching_rows:
+                    widgets.QTreeWidgetItem(grp_item, r)
 
         self.list.resizeColumnToContents(0)
 
@@ -271,20 +312,8 @@ class EcuList(widgets.QWidget):
         elm.dnat = self.vehicles["projects"][project_key]["dnat"]
         elm.dnat_ext = self.vehicles["projects"][project_key]["dnat_ext"]
 
-        root = self.list.invisibleRootItem()
-        root_items = [root.child(i) for i in range(root.childCount())]
-
-        for root_item in root_items:
-            root_hidden = True
-
-            items = [root_item.child(i) for i in range(root_item.childCount())]
-            for item in items:
-                if (project.upper() in str(item.text(7)).upper().split("/")) or project == "ALL":
-                    item.setHidden(False)
-                    root_hidden = False
-                else:
-                    item.setHidden(True)
-            root_item.setHidden(root_hidden)
+        # Lazy populate matching items only
+        self.populate_for_project(project)
 
     def ecuSel(self, index):
         if index.parent() == core.QModelIndex():
@@ -311,13 +340,11 @@ class EcuList(widgets.QWidget):
     
     def auto_restore_state(self):
         """Auto-filter and auto-select the last opened ECU after initialization"""
-        # Filter the ECU list for the selected vehicle
-        last_vehicle = options.get_last_selected_vehicle()
-        if last_vehicle:
-            try:
-                self.filterProject()
-            except Exception as e:
-                print(f"Error filtering project: {e}")
+        # Filter the ECU list for the selected vehicle (or default)
+        try:
+            self.filterProject()
+        except Exception as e:
+            print(f"Error filtering project: {e}")
         
         # Auto-select the last opened ECU
         last_ecu = options.get_last_opened_ecu()

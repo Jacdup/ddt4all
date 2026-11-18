@@ -116,51 +116,30 @@ def main(argv=None) -> int:
     Path(get_json_dir()).mkdir(parents=True, exist_ok=True)
     Path(get_logs_dir()).mkdir(parents=True, exist_ok=True)
 
-    pc = MainWindowOptions(app)
-    nok = True
-    while nok:
-        pcres = pc.exec_()
+    # Single unified mode: Start directly without modal gates.
+    # Attempt connection if adapter was previously configured, otherwise start in simulation/offline mode.
+    options.simulation_mode = True
+    options.port = 'DUMMY'
+    options.promode = False
 
-        if pc.mode == 0 or pcres == widgets.QDialog.Rejected:
-            return 0
-        # Mode 3: Language/DoIP change - reload dialog without exiting
-        if pc.mode == 3:
-            pc = MainWindowOptions(app)
-            continue
+    saved_port = configuration.get("last_port", "")
+    saved_speed = configuration.get("last_port_speed", 38400)
+    saved_adapter = configuration.get("last_adapter", "STD")
 
-        options.opt_can2 = pc.CAN2
-
-        if pc.mode == 1:
-            options.promode = False
-            options.simulation_mode = False
-        if pc.mode == 2:
-            options.promode = False
+    if saved_port and saved_port != 'DUMMY':
+        try:
+            print(_("Attempting connection to %s...") % saved_port)
+            test_elm = elm.ELM(saved_port, saved_speed, saved_adapter, "No")
+            if not options.elm_failed and test_elm:
+                options.elm = test_elm
+                options.port = saved_port
+                options.port_speed = saved_speed
+                options.simulation_mode = False
+                print(_("Connected successfully to %s") % saved_port)
+        except Exception as e:
+            print(_("Hardware connection skipped: %s") % e)
             options.simulation_mode = True
-            break
-
-        options.port = str(pc.port)
-        port_speed = pc.selectedportspeed
-
-        if not options.port:
-            msgbox = widgets.QMessageBox()
-            msgbox.setWindowIcon(gui.QIcon(":icons/obd.png"))
-            msgbox.setWindowTitle(version.__appname__)
-            msgbox.setText(_("No COM port selected"))
-            msgbox.exec_()
-
-        print(_("Initializing ELM with speed %i...") % port_speed)
-        options.elm = elm.ELM(options.port, port_speed, pc.adapter, pc.raise_port_speed)
-
-        if options.elm_failed:
-            pc.show()
-            pc.logview.append(options.get_last_error())
-            msgbox = widgets.QMessageBox()
-            msgbox.setWindowIcon(gui.QIcon(":icons/obd.png"))
-            msgbox.setWindowTitle(version.__appname__)
-            msgbox.setText(_("No ELM327 or OBDLINK-SX detected on COM port ") + options.port)
-            msgbox.exec_()
-        else:
-            nok = False
+            options.port = 'DUMMY'
 
     w = MainWidget(app, vehicles)
     options.main_window = w

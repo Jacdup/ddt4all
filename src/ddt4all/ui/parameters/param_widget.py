@@ -537,6 +537,11 @@ class ParamWidget(widgets.QWidget):
         self.initELM()
 
     def initELM(self):
+        if options.elm is None:
+            if self.main_protocol_status:
+                self.main_protocol_status.setText(f"{self.ecurequestsparser.ecu_protocol} (Offline)")
+            return
+
         connection_status = self.ecurequestsparser.connect_to_hardware(self.canline)
         if not connection_status:
             self.logview.append("<font color='red'>" + _("Protocol not supported") + "</font>")
@@ -700,7 +705,7 @@ class ParamWidget(widgets.QWidget):
             command = str(command)
 
         elm_response = '00 ' * 70
-        if not options.simulation_mode:
+        if not options.simulation_mode and options.elm is not None:
             if not options.elm.connectionStat():
                 options.main_window.setConnected(False)
                 self.logview.append(_("Connection to ELM lost, trying to reconnect..."))
@@ -1064,11 +1069,11 @@ class ParamWidget(widgets.QWidget):
         self.logview.append('<font color=blue>' + _('ECU uses SDS ') + '</font> <font color=orange>%s</font>' % sds)
 
         if self.ecurequestsparser.ecu_protocol == "CAN":
-            if not options.simulation_mode:
+            if not options.simulation_mode and options.elm is not None:
                 options.elm.start_session_can(sds)
             self.currentsession = sds
         elif self.ecurequestsparser.ecu_protocol == "KWP2000":
-            if not options.simulation_mode:
+            if not options.simulation_mode and options.elm is not None:
                 options.elm.start_session_iso(sds)
             self.currentsession = sds
 
@@ -1275,7 +1280,19 @@ class ParamWidget(widgets.QWidget):
         if options.elm is not None:
             options.elm.set_can_timeout(options.cantimeout)
 
-        self.dtcdialog.close()
+        if hasattr(self, 'dtcdialog') and self.dtcdialog:
+            self.dtcdialog.close()
+
+        if options.simulation_mode:
+            msgbox = widgets.QMessageBox()
+            appIcon = gui.QIcon(PATH_PNG_ODB)
+            msgbox.setWindowIcon(appIcon)
+            msgbox.setWindowTitle(version.__appname__)
+            msgbox.setText(_("DTCs cleared successfully (Simulation)."))
+            msgbox.exec_()
+            if options.main_window:
+                options.main_window.logview.append("<font color=green>" + _("Clear DTC successfully done") + "</font>")
+            return
 
         if 'WRONG' in response:
             msgbox = widgets.QMessageBox()
@@ -1288,6 +1305,54 @@ class ParamWidget(widgets.QWidget):
         else:
             options.main_window.logview.append("<font color=green>" + _("Clear DTC successfully done") + "</font>")
 
+    def show_simulated_dtc(self):
+        self.dtcdialog = widgets.QDialog(None)
+        appIcon = gui.QIcon(PATH_PNG_ODB)
+        self.dtcdialog.setWindowIcon(appIcon)
+        self.dtcdialog.setWindowTitle(_("Diagnostic Trouble Codes (Simulation)"))
+        self.dtcdialog.resize(600, 450)
+        dtc_view = widgets.QTextEdit(None)
+        dtc_view.setReadOnly(True)
+        layout = widgets.QVBoxLayout()
+        self.dtcdialog.setLayout(layout)
+        
+        btn_layout = widgets.QHBoxLayout()
+        clearbutton = widgets.QPushButton(_("Clear ALL DTC"))
+        clearbutton.clicked.connect(self.clearDTC)
+        btn_layout.addWidget(clearbutton)
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+        layout.addWidget(dtc_view)
+
+        html = f"""
+        <h2 style="color: #cf222e; margin-bottom: 4px;">{_("Diagnostic Trouble Codes (Simulation)")}</h2>
+        <p style="color: #586069; font-size: 10pt;"><b>ECU:</b> {self.ecu_name} &nbsp;|&nbsp; <b>Protocol:</b> {self.ecurequestsparser.ecu_protocol} &nbsp;|&nbsp; <b>Status:</b> Simulation / Offline Mode</p>
+        <hr/>
+        <div style="background-color: rgba(207, 34, 46, 0.1); border-left: 4px solid #cf222e; padding: 10px; margin: 10px 0; border-radius: 4px;">
+            <h3 style="color: #cf222e; margin-top: 0;">DTC #1: DTC0120</h3>
+            <p><b>Description:</b> Throttle / Pedal Position Sensor 'A' Circuit Malfunction<br/>
+            <b>Hex Code:</b> [01 20 14]<br/>
+            <b>State:</b> Active / Confirmed<br/>
+            <b>MIL Warning:</b> ON</p>
+        </div>
+        <div style="background-color: rgba(210, 153, 34, 0.1); border-left: 4px solid #d29922; padding: 10px; margin: 10px 0; border-radius: 4px;">
+            <h3 style="color: #d29922; margin-top: 0;">DTC #2: DTC0562</h3>
+            <p><b>Description:</b> System Voltage Low<br/>
+            <b>Hex Code:</b> [05 62 28]<br/>
+            <b>State:</b> Historic / Intermittent<br/>
+            <b>MIL Warning:</b> OFF</p>
+        </div>
+        <div style="background-color: rgba(9, 105, 218, 0.1); border-left: 4px solid #0969da; padding: 10px; margin: 10px 0; border-radius: 4px;">
+            <h3 style="color: #0969da; margin-top: 0;">DTC #3: U0100</h3>
+            <p><b>Description:</b> Lost Communication With ECM/PCM 'A'<br/>
+            <b>Hex Code:</b> [C1 00 87]<br/>
+            <b>State:</b> Historic<br/>
+            <b>MIL Warning:</b> OFF</p>
+        </div>
+        """
+        dtc_view.setHtml(html)
+        self.dtcdialog.exec_()
+
     def readDTC(self):
         if not options.simulation_mode:
             if self.ecurequestsparser.ecu_protocol == "CAN":
@@ -1295,12 +1360,27 @@ class ParamWidget(widgets.QWidget):
             elif self.ecurequestsparser.ecu_protocol == "KWP2000":
                 options.elm.start_session_iso('10C0')
 
-        if "ReadDTCInformation.ReportDTC" in self.ecurequestsparser.requests:
-            request = self.ecurequestsparser.requests["ReadDTCInformation.ReportDTC"]
-        elif "ReadDTC" in self.ecurequestsparser.requests:
-            request = self.ecurequestsparser.requests["ReadDTC"]
-        else:
+        request = None
+        for cand in ["ReadDTCInformation.ReportDTC", "ReadDTC", "Read_DTC", "ReadDTCInformation", "ReportDTC"]:
+            if cand in self.ecurequestsparser.requests:
+                request = self.ecurequestsparser.requests[cand]
+                break
+        if not request:
+            for rname, req in self.ecurequestsparser.requests.items():
+                if 'readdtc' in rname.lower() or ('read' in rname.lower() and 'dtc' in rname.lower()):
+                    request = req
+                    break
+        if not request:
+            if options.simulation_mode:
+                self.show_simulated_dtc()
+                return
             self.logview.append(_("No ReadDTC request for that ECU"))
+            msgbox = widgets.QMessageBox()
+            appIcon = gui.QIcon(PATH_PNG_ODB)
+            msgbox.setWindowIcon(appIcon)
+            msgbox.setWindowTitle(version.__appname__)
+            msgbox.setText(_("No ReadDTC request found in this ECU definition."))
+            msgbox.exec_()
             return
 
         shiftbytecount = request.shiftbytescount

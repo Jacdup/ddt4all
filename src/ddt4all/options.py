@@ -16,7 +16,7 @@ def _dynamic_gettext(message):
     return _current_translation.gettext(message)
 
 
-simulation_mode = False
+simulation_mode = True
 port_speed = 38400
 port_name = ""
 port = ""

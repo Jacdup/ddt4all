@@ -238,7 +238,7 @@ class EcuFile:
         short_addr = None
         # print("Connecting to ECU > " + self.ecu_protocol + " > " + ecuname )
         if self.ecu_protocol.upper() == 'CAN':
-            if not options.simulation_mode:
+            if not options.simulation_mode and options.elm is not None:
                 if len(self.ecu_send_id) == 8:
                     short_addr = elm.get_can_addr_ext(self.ecu_send_id)
                 else:
@@ -249,7 +249,7 @@ class EcuFile:
                     return False
             ecu_conf = {'idTx': self.ecu_send_id, 'idRx': self.ecu_recv_id, 'ecuname': str(ecuname), 'protocol': 'CAN'}
 
-            if not options.simulation_mode:
+            if not options.simulation_mode and options.elm is not None:
                 # Preserve the ECU metadata's CAN baudrate hint so Auto mode can choose
                 # the correct 250 kbit/s branch when the target bus is not 500 kbit/s.
                 if self.baudrate == 250000 or self.baudrate == 10400:
@@ -261,14 +261,14 @@ class EcuFile:
         elif self.ecu_protocol.upper() == 'KWP2000':
             ecu_conf = {'idTx': '', 'idRx': '', 'ecuname': str(ecuname), 'protocol': 'KWP2000'}
             options.opt_si = not self.fastinit
-            if not options.simulation_mode:
+            if not options.simulation_mode and options.elm is not None:
                 options.elm.init_iso()
                 options.elm.set_iso_addr(self.funcaddr, ecu_conf)
 
         # ISO handling
         elif self.ecu_protocol.upper() == 'ISO':
             ecu_conf = {'idTx': '', 'idRx': '', 'ecuname': str(ecuname), 'protocol': 'ISO'}
-            if not options.simulation_mode:
+            if not options.simulation_mode and options.elm is not None:
                 options.elm.init_iso()
                 options.elm.set_iso_addr(self.funcaddr, ecu_conf)
 
@@ -276,7 +276,7 @@ class EcuFile:
         # //TODO: this need maybe some small fix in set_iso8_addr()
         elif self.ecu_protocol.upper() == 'ISO8':
             ecu_conf = {'idTx': '', 'idRx': '', 'ecuname': str(ecuname), 'protocol': 'ISO8'}
-            if not options.simulation_mode:
+            if not options.simulation_mode and options.elm is not None:
                 options.elm.init_iso()
                 options.elm.set_iso8_addr(self.funcaddr, ecu_conf)
 
