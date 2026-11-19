@@ -509,7 +509,7 @@ class Transport:
                 "%s command %s requires user confirmation" % (risk, stream))
         spaced = " ".join(stream[i:i + 2] for i in range(0, len(stream), 2))
         if self.simulated:
-            if request is not None and request.replybytes:
+            if risk == RISK_READ and request is not None and request.replybytes:
                 rb = request.replybytes.replace(" ", "")
                 return " ".join(rb[i:i + 2] for i in range(0, len(rb), 2))
             if risk == RISK_READ:

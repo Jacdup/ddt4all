@@ -206,14 +206,19 @@ Vehicle-specific procedures are provided as Python modules under
 - `megane3_eps_reset.py` — Megane 3 EPS
 - `rsat4_reset.py` — RSAT4 system reset
 - `system_diagnostics.py` — functional-system diagnostics across the
-  *Detected ECUs* (first profile: climate / A/C). Read-only scan of
-  identification, fault codes and system parameters (HVAC read entirely;
-  engine ECU, UCH/BCM... filtered by keyword), cross-ECU configuration
-  comparison, HTML report, and confirmed start/stop actuator tests. Commands
-  are classified by service ID; anything other than a read requires an
-  explicit confirmation showing the exact bytes, and output controls are
-  returned to the ECU on close. New systems are added as profiles in
-  `system_diag_lib/profiles.py`.
+  *Detected ECUs* (first profile: climate / A/C). Opens a one-screen
+  **guided check**: one *Start* button, a live checklist that follows the
+  request through the car (climate unit → network → engine ECU → compressor)
+  and a single verdict naming the first failing step, plus generic findings
+  for any fault (modules carrying another car's VIN, communication and
+  configuration fault codes, fault indicators, database/software mismatch).
+  An optional, confirmed 10-second direct compressor test tells hardware
+  faults from control faults. *Details…* opens the full scan (all parameters,
+  fault codes, start/stop commands, HTML report). Commands are classified by
+  service ID; anything other than a read requires an explicit confirmation
+  showing the exact bytes, and output controls are always returned to the
+  ECU. New systems are added as profiles in `system_diag_lib/profiles.py`
+  (checkpoints are data: signal name patterns, expected values, messages).
 - `vin_crc.py` — VIN CRC calculation
 - `zoe_waterpump_counter_reset.py` — ZOE water-pump counting reset
 

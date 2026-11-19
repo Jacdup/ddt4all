@@ -29,7 +29,9 @@ import PyQt5.QtWidgets as gui
 
 import ddt4all.options as options
 from ddt4all.core.ecu.ecu_file import EcuFile
+from ddt4all.plugins.system_diag_lib import chain as C
 from ddt4all.plugins.system_diag_lib import engine as E
+from ddt4all.plugins.system_diag_lib.guided import GuidedRun
 from ddt4all.plugins.system_diag_lib.profiles import PROFILES
 
 _ = options.translator('ddt4all')
@@ -56,6 +58,42 @@ MATCH_HELP = {
     E.MATCH_UNVERIFIED: _("not verified against the car (loaded from vehicle/catalog)"),
     E.MATCH_UNKNOWN: _("no database file found"),
 }
+
+
+def confirm_commands(parent, items):
+    """items: (target, request, stream, risk, release)."""
+    writes = [i for i in items if i[3] == E.RISK_WRITE]
+    lines = []
+    for tg, req, stream, risk, release in items:
+        lines.append("<li><b>%s</b> - %s<br><code>%s</code> [%s]%s</li>" % (
+            html.escape(tg.label), html.escape(req.name), stream, RISK_TEXT.get(risk, risk),
+            ("<br>" + _("stop with") + " <code>%s</code>" % release) if release else ""))
+    text = "<p>" + _("You are about to send the following command(s) to the vehicle:") + \
+           "</p><ul>" + "".join(lines) + "</ul>"
+    text += "<p>" + _("ACTUATOR commands drive motors, valves, relays or the compressor until "
+                      "control is returned to the ECU. Make sure the engine bay and fan area "
+                      "are clear and the vehicle is safe.") + "</p>"
+    if writes:
+        text += "<p><b><font color='red'>" + _(
+            "WRITE / RESET commands change data stored in the ECU (configuration, learning, "
+            "counters). A wrong value can disable functions or immobilise the vehicle and may "
+            "not be reversible. Note the current values first.") + "</font></b></p>"
+    mb = gui.QMessageBox(parent)
+    mb.setIcon(gui.QMessageBox.Warning)
+    mb.setWindowTitle(_("Confirm command"))
+    mb.setText(text)
+    mb.setStandardButtons(gui.QMessageBox.Yes | gui.QMessageBox.Cancel)
+    mb.setDefaultButton(gui.QMessageBox.Cancel)
+    if mb.exec_() != gui.QMessageBox.Yes:
+        return False
+    if writes:
+        again = gui.QMessageBox.warning(
+            parent, _("Confirm ECU write"),
+            _("Last check: %d command(s) will MODIFY ECU memory. Continue?") % len(writes),
+            gui.QMessageBox.Yes | gui.QMessageBox.No, gui.QMessageBox.No)
+        if again != gui.QMessageBox.Yes:
+            return False
+    return True
 
 
 class EcuResult:
@@ -633,39 +671,7 @@ class SystemDiagDialog(gui.QDialog):
         return values
 
     def _confirm(self, items):
-        """items: (target, request, stream, risk, release)."""
-        writes = [i for i in items if i[3] == E.RISK_WRITE]
-        lines = []
-        for tg, req, stream, risk, release in items:
-            lines.append("<li><b>%s</b> - %s<br><code>%s</code> [%s]%s</li>" % (
-                html.escape(tg.label), html.escape(req.name), stream, RISK_TEXT.get(risk, risk),
-                ("<br>" + _("stop with") + " <code>%s</code>" % release) if release else ""))
-        text = "<p>" + _("You are about to send the following command(s) to the vehicle:") + \
-               "</p><ul>" + "".join(lines) + "</ul>"
-        text += "<p>" + _("ACTUATOR commands drive motors, valves, relays or the compressor until "
-                          "control is returned to the ECU. Make sure the engine bay and fan area "
-                          "are clear and the vehicle is safe.") + "</p>"
-        if writes:
-            text += "<p><b><font color='red'>" + _(
-                "WRITE / RESET commands change data stored in the ECU (configuration, learning, "
-                "counters). A wrong value can disable functions or immobilise the vehicle and may "
-                "not be reversible. Note the current values first.") + "</font></b></p>"
-        mb = gui.QMessageBox(self)
-        mb.setIcon(gui.QMessageBox.Warning)
-        mb.setWindowTitle(_("Confirm command"))
-        mb.setText(text)
-        mb.setStandardButtons(gui.QMessageBox.Yes | gui.QMessageBox.Cancel)
-        mb.setDefaultButton(gui.QMessageBox.Cancel)
-        if mb.exec_() != gui.QMessageBox.Yes:
-            return False
-        if writes:
-            again = gui.QMessageBox.warning(
-                self, _("Confirm ECU write"),
-                _("Last check: %d command(s) will MODIFY ECU memory. Continue?") % len(writes),
-                gui.QMessageBox.Yes | gui.QMessageBox.No, gui.QMessageBox.No)
-            if again != gui.QMessageBox.Yes:
-                return False
-        return True
+        return confirm_commands(self, items)
 
     def run_selected_actions(self):
         if self.busy:
@@ -831,6 +837,343 @@ class SystemDiagDialog(gui.QDialog):
         super(SystemDiagDialog, self).done(r)
 
 
+# ==========================================================================
+# Guided check: one screen, one button, one verdict
+# ==========================================================================
+STATE_STYLE = {
+    C.OK: ("✔", "#2ea043"),
+    C.FAIL: ("✖", "#e5534b"),
+    C.WAIT: ("…", "#d29922"),
+    C.NA: ("–", "#8b949e"),
+    C.NOT_REACHED: ("·", "#8b949e"),
+}
+LEVEL_COLOR = {"fault": "#e5534b", "ok": "#2ea043", "waiting": "#d29922", "unknown": "#8b949e"}
+CYCLE_PAUSE_MS = 1000
+
+
+def _pump(seconds):
+    """Sleep while keeping the window responsive."""
+    end = time.time() + seconds
+    while time.time() < end:
+        gui.QApplication.processEvents()
+        time.sleep(0.05)
+
+
+class GuidedDialog(gui.QDialog):
+    def __init__(self, parent=None):
+        super(GuidedDialog, self).__init__(parent)
+        self.setWindowIcon(qtgui.QIcon(":icons/obd.png"))
+        self.setWindowTitle(plugin_name)
+        self.resize(900, 760)
+        self.transport = E.Transport(options, self._log)
+        self.profiles = [p for p in PROFILES if p.chain]
+        self.profile = self.profiles[0]
+        self.ecufiles = {}
+        self.run = None
+        self.running = self.busy = self.pending_test = False
+        self.test_lines = []
+        self._build()
+
+    # ------------------------------------------------------------------ UI
+    def _build(self):
+        lay = gui.QVBoxLayout(self)
+        head = gui.QHBoxLayout()
+        title = gui.QLabel("<span style='font-size:16pt; font-weight:bold'>%s</span>"
+                           % html.escape(self.profile.name))
+        head.addWidget(title)
+        if len(self.profiles) > 1:
+            combo = gui.QComboBox()
+            for p in self.profiles:
+                combo.addItem(p.name)
+            combo.currentIndexChanged.connect(lambda i: setattr(self, "profile", self.profiles[i]))
+            head.addWidget(combo)
+        head.addStretch()
+        mode = gui.QLabel(("<b style='color:#0969da'>%s</b>" % _("SIMULATION")) if self.transport.simulated
+                          else ("<b style='color:#2ea043'>%s</b>" % _("LIVE")))
+        head.addWidget(mode)
+        lay.addLayout(head)
+
+        info = gui.QLabel(self.profile.instructions)
+        info.setWordWrap(True)
+        lay.addWidget(info)
+
+        row = gui.QHBoxLayout()
+        self.start_btn = gui.QPushButton(_("Start check"))
+        self.start_btn.setMinimumHeight(36)
+        self.start_btn.clicked.connect(self.start)
+        self.stop_btn = gui.QPushButton(_("Stop"))
+        self.stop_btn.setMinimumHeight(36)
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.clicked.connect(self.stop)
+        row.addWidget(self.start_btn, 3)
+        row.addWidget(self.stop_btn, 1)
+        lay.addLayout(row)
+
+        self.checklist = gui.QTreeWidget()
+        self.checklist.setColumnCount(3)
+        self.checklist.setHeaderLabels(["", _("Checkpoint"), _("Values read")])
+        self.checklist.setRootIsDecorated(False)
+        self.checklist.setColumnWidth(0, 28)
+        self.checklist.setColumnWidth(1, 300)
+        lay.addWidget(self.checklist, 3)
+
+        self.verdict = gui.QTextBrowser()
+        lay.addWidget(self.verdict, 4)
+
+        bottom = gui.QHBoxLayout()
+        test = self.profile.active_test
+        self.test_btn = gui.QPushButton(test.title if test else "")
+        self.test_btn.setVisible(test is not None)
+        self.test_btn.setEnabled(False)
+        self.test_btn.clicked.connect(self.request_test)
+        details = gui.QPushButton(_("Details..."))
+        details.setToolTip(_("Full scan of every parameter, fault code and command"))
+        details.clicked.connect(self.open_details)
+        export = gui.QPushButton(_("Export..."))
+        export.clicked.connect(self.export)
+        self.status = gui.QLabel()
+        bottom.addWidget(self.test_btn)
+        bottom.addWidget(details)
+        bottom.addWidget(export)
+        bottom.addStretch()
+        bottom.addWidget(self.status)
+        lay.addLayout(bottom)
+
+        self._fill_checklist([])
+        self.verdict.setHtml("<p>%s</p>" % html.escape(
+            _("Press 'Start check'. The modules are read (nothing is changed), then the "
+              "checkpoints update live while you operate the system.")))
+
+    def _log(self, msg, color=None):
+        self.status.setText(msg)
+        if options.main_window is not None and hasattr(options.main_window, "logview"):
+            options.main_window.logview.append("[%s] %s" % (_("A/C check"), html.escape(msg)))
+
+    def _fill_checklist(self, results):
+        self.checklist.clear()
+        by_id = {r.check.id: r for r in results}
+        for chk in self.profile.chain:
+            res = by_id.get(chk.id)
+            state = res.state if res else None
+            icon, color = STATE_STYLE.get(state, ("", "#8b949e"))
+            title = chk.title + ("  (" + _("condition") + ")" if chk.precondition else "")
+            values = "; ".join(res.details) if res else ""
+            if res and state == C.NA:
+                values = _("not available on this car")
+            item = gui.QTreeWidgetItem([icon, title, values])
+            item.setForeground(0, qtgui.QColor(color))
+            if state == C.FAIL:
+                for col in range(3):
+                    item.setBackground(col, qtgui.QColor("#ffebe9"))
+                    item.setForeground(col, qtgui.QColor("#82071e"))
+            elif state in (C.NA, C.NOT_REACHED):
+                item.setForeground(1, qtgui.QColor("#8b949e"))
+            item.setToolTip(2, values)
+            if chk.independent:
+                item.setToolTip(1, _("Checked independently of the steps above"))
+            self.checklist.addTopLevelItem(item)
+
+    def _verdict_html(self):
+        v = self.run.verdict if self.run else None
+        h = []
+        if self.transport.simulated:
+            h.append("<p style='color:#0969da'><b>%s</b></p>" % html.escape(
+                _("SIMULATION: values are database defaults, not your car.")))
+        if v is not None:
+            h.append("<h2 style='color:%s; margin-bottom:2px'>%s</h2>" % (
+                LEVEL_COLOR.get(v.level, "black"), html.escape(v.headline)))
+            h.append("<p>%s</p>" % html.escape(v.explanation))
+            if v.action:
+                h.append("<p><b>%s</b> %s</p>" % (_("What to do:"), html.escape(v.action)))
+            if v.findings:
+                h.append("<h3>%s</h3><ul>" % _("Other problems found"))
+                for f in v.findings[:12]:
+                    h.append("<li><b>%s</b>: %s%s</li>" % (
+                        html.escape(f.ecu), html.escape(f.text),
+                        ("<br><i>%s</i>" % html.escape(f.action)) if f.action else ""))
+                if len(v.findings) > 12:
+                    h.append("<li>%s</li>" % (_("... %d more, see Export") % (len(v.findings) - 12)))
+                h.append("</ul>")
+        if self.test_lines:
+            h.append("<h3>%s</h3><ul>%s</ul>" % (
+                _("Direct test"), "".join("<li>%s</li>" % html.escape(l) for l in self.test_lines)))
+        if self.run:
+            notes = []
+            miss = self.run.missing_roles()
+            if miss:
+                notes.append(_("Not in 'Detected ECUs': %s (its checkpoints are skipped).")
+                             % ", ".join(miss))
+            for skipped, kept in self.run.skipped:
+                notes.append(_("Duplicate entry ignored: %s (same module as %s).")
+                             % (skipped.label, kept.label))
+            silent = [lbl for lbl, err in self.run.dtc_errors.items() if err]
+            if silent:
+                notes.append(_("Fault codes not readable from: %s.") % ", ".join(silent))
+            if notes:
+                h.append("<p style='color:#57606a; font-size:small'>%s</p>"
+                         % "<br>".join(html.escape(n) for n in notes))
+        return "".join(h)
+
+    # ------------------------------------------------------------- running
+    def _load(self, target):
+        if target.path not in self.ecufiles:
+            ef = EcuFile(target.path, True)
+            self.ecufiles[target.path] = ef if ef.requests else None
+        return self.ecufiles[target.path]
+
+    @staticmethod
+    def _canline():
+        combo = getattr(options.main_window, "canlinecombo", None)
+        return combo.currentIndex() if combo is not None else 0
+
+    def _set_running(self, on):
+        self.running = on
+        self.start_btn.setEnabled(not on)
+        self.stop_btn.setEnabled(on)
+
+    def start(self):
+        mw = options.main_window
+        targets = E.detected_ecus(mw, options.ecus_dir) if mw is not None and hasattr(mw, "treeview_ecu") else []
+        if not targets:
+            self.verdict.setHtml("<h3>%s</h3><p>%s</p>" % (
+                _("No ECU in the 'Detected ECUs' panel."),
+                _("Scan the vehicle (or load a saved vehicle) first, then start the check.")))
+            return
+        self.test_lines = []
+        self._set_running(True)
+        self.busy = True
+        try:
+            self._log(_("Loading ECU database files..."))
+            gui.QApplication.processEvents()
+            self.run = GuidedRun(self.profile, targets, self._load, self.transport,
+                                 self._log, self._canline())
+            if not self.run.roles:
+                self.verdict.setHtml("<h3>%s</h3>" % html.escape(
+                    _("None of the modules of this system is in 'Detected ECUs'.")))
+                self._set_running(False)
+                return
+            self.verdict.setHtml("<p>%s</p>" % html.escape(
+                _("Reading identification and fault codes of every module (read-only)...")))
+            self.run.baseline(tick=gui.QApplication.processEvents)
+        finally:
+            self.busy = False
+        if self.running:
+            self.test_btn.setEnabled(self.run.prepare_active_test() is not None)
+            self._cycle()
+
+    def _cycle(self):
+        if not self.running or self.run is None:
+            return
+        self.busy = True
+        try:
+            self.run.cycle(tick=gui.QApplication.processEvents)
+        finally:
+            self.busy = False
+        self._fill_checklist(self.run.results)
+        self.verdict.setHtml(self._verdict_html())
+        self._log(_("Updated %s - live") % time.strftime("%H:%M:%S"))
+        if self.pending_test:
+            self.pending_test = False
+            self.run_test()
+        if self.running:
+            core.QTimer.singleShot(CYCLE_PAUSE_MS, self._cycle)
+
+    def stop(self):
+        self._set_running(False)
+        if self.run:
+            self.run.cancelled = True
+        self._log(_("Stopped"))
+
+    # ---------------------------------------------------------- direct test
+    def request_test(self):
+        if self.busy:
+            self.pending_test = True      # run it between two cycles
+            self._log(_("Direct test will start after the current reading..."))
+        else:
+            self.run_test()
+
+    def run_test(self):
+        plan = self.run.prepare_active_test() if self.run else None
+        if plan is None:
+            self._log(_("No direct test available for this car"))
+            return
+        if not confirm_commands(self, [plan]):
+            self._log(_("Direct test cancelled - nothing sent"))
+            return
+        self.busy = True
+        self.run.cancelled = False       # Stop during the test still aborts (and releases)
+        self.test_btn.setEnabled(False)
+        try:
+            self._log(_("Direct test running..."))
+            self.test_lines = self.run.run_active_test(
+                plan, tick=gui.QApplication.processEvents, sleep=_pump)
+        finally:
+            self.busy = False
+            self.test_btn.setEnabled(True)
+        self.verdict.setHtml(self._verdict_html())
+
+    # --------------------------------------------------------- details etc.
+    def open_details(self):
+        was_running = self.running
+        if was_running:
+            self.stop()
+            while self.busy:
+                _pump(0.1)
+        SystemDiagDialog(self).exec_()
+
+    def export(self):
+        if not self.run:
+            self._log(_("Nothing to export, start the check first"))
+            return
+        try:
+            from ddt4all.file_manager import get_logs_dir
+            folder = str(get_logs_dir())
+        except Exception:
+            folder = "."
+        default = os.path.join(folder, "ac_check_%s.html" % time.strftime("%Y%m%d_%H%M%S"))
+        filename, _sel = gui.QFileDialog.getSaveFileName(self, _("Export report"), default, "*.html")
+        if not filename:
+            return
+        r = self.run
+        h = ["<html><head><meta charset='utf-8'><title>%s</title></head><body>"
+             % html.escape(self.profile.name),
+             "<h1>%s</h1><p>%s %s%s</p>" % (
+                 html.escape(self.profile.name), _("Generated"), time.strftime("%Y-%m-%d %H:%M"),
+                 (" - " + _("SIMULATION")) if self.transport.simulated else ""),
+             self._verdict_html(),
+             "<h3>%s</h3><table border='1' cellspacing='0' cellpadding='3'>" % _("Checkpoints")]
+        for res in r.results:
+            h.append("<tr><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+                html.escape(res.state), html.escape(res.check.title), html.escape("; ".join(res.details))))
+        h.append("</table><h3>%s</h3><table border='1' cellspacing='0' cellpadding='3'>"
+                 % _("Modules"))
+        for t in r.kept.values():
+            role = next((r.role_names[k] for k, v in r.roles.items() if v is t), "")
+            h.append("<tr><td>%s</td><td>%s</td><td>%s</td><td>VIN %s</td><td>%s</td></tr>" % (
+                html.escape(t.label), html.escape(role), html.escape(t.match),
+                html.escape(r.vins.get(t.label) or "?"),
+                html.escape("; ".join("%s %s %s" % (d.code, d.description, d.status)
+                                      for d in r.dtcs.get(t.label, [])) or
+                            r.dtc_errors.get(t.label, _("no fault code")))))
+        h.append("</table><h3>%s</h3><table border='1' cellspacing='0' cellpadding='3'>"
+                 % _("All values read"))
+        for (label, item), value in sorted(r.values.items()):
+            h.append("<tr><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+                html.escape(label), html.escape(item),
+                html.escape(_("no answer") if value is None else str(value))))
+        h.append("</table></body></html>")
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write("".join(h))
+        self._log(_("Report saved to") + " " + filename)
+
+    def done(self, r):
+        self.stop()
+        if self.busy:                    # finish the current reading first
+            core.QTimer.singleShot(200, lambda: self.done(r))
+            return
+        super(GuidedDialog, self).done(r)
+
+
 def plugin_entry():
-    dlg = SystemDiagDialog()
+    dlg = GuidedDialog()
     dlg.exec_()
